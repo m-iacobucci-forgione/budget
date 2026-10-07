@@ -341,12 +341,21 @@ function calcola(d) {
 }
 
 /* ================= Sincronizzazione con il foglio ================= */
+const TIMEOUT_SYNC = 60000;
 async function richiesta(body) {
   let r;
-  if (body) {
-    r = await fetch(S.cfg.url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(Object.assign({ token: S.cfg.token }, body)) });
-  } else {
-    r = await fetch(S.cfg.url + (S.cfg.url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(S.cfg.token) + '&t=' + Date.now());
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_SYNC);
+  try {
+    if (body) {
+      r = await fetch(S.cfg.url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(Object.assign({ token: S.cfg.token }, body)), signal: ctrl.signal });
+    } else {
+      r = await fetch(S.cfg.url + (S.cfg.url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(S.cfg.token) + '&t=' + Date.now(), { signal: ctrl.signal });
+    }
+  } catch (e) {
+    throw new Error(e.name === 'AbortError' ? 'il foglio non ha risposto entro ' + TIMEOUT_SYNC / 1000 + ' secondi. Riprova tra poco.' : e.message);
+  } finally {
+    clearTimeout(timer);
   }
   let j;
   try { j = await r.json(); } catch (e) { throw new Error('Risposta non valida: controlla l\'indirizzo e che l\'app web sia pubblicata con accesso "Chiunque".'); }
@@ -356,8 +365,9 @@ async function richiesta(body) {
 
 async function sincronizza(silenzioso) {
   if (!S.cfg.url || !S.cfg.token) { if (!silenzioso) toast('Collega prima il tuo foglio in Impostazioni.'); return; }
-  if (S.sync) return;
-  S.sync = true; statoSync();
+  // Se una sincronizzazione precedente si è "persa" (es. app andata in secondo piano), la si sblocca
+  if (S.sync && Date.now() - (S.syncDal || 0) < TIMEOUT_SYNC + 5000) return;
+  S.sync = true; S.syncDal = Date.now(); statoSync();
   try {
     const ops = S.coda.slice();
     const j = ops.length ? await richiesta({ action: 'batch', ops }) : await richiesta(null);
@@ -373,7 +383,7 @@ async function sincronizza(silenzioso) {
     }
   } finally {
     S.sync = false; render();
-    if (S.coda.length && navigator.onLine !== false) setTimeout(() => sincronizza(true), 4000);
+    if (S.coda.length && navigator.onLine !== false) setTimeout(() => sincronizza(true), 8000);
   }
 }
 
