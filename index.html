@@ -161,11 +161,12 @@ const store = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } ca
 /* ================= Stato ================= */
 const S = {
   cfg: load(K.cfg, { url: '', token: '' }),
-  dati: load(K.dati, { movimenti: [], categorie: [], strumenti: [], investimenti: [] }),
+  dati: load(K.dati, { movimenti: [], categorie: [], strumenti: [], investimenti: [], ricorrenti: [] }),
   coda: load(K.coda, []),
   agg: load(K.agg, null),
   vista: 'home', mese: oggiMese(), anno: oggiMese().slice(0, 4), sync: false
 };
+if (!S.dati.ricorrenti) S.dati.ricorrenti = [];
 const salvaLocale = () => { store(K.dati, S.dati); store(K.coda, S.coda); store(K.agg, S.agg); };
 
 function categorie(tipo) {
@@ -208,9 +209,80 @@ function applica(d, op) {
       if (!d.categorie.length) Object.keys(CATEGORIE_BASE).forEach(t => CATEGORIE_BASE[t].forEach(c => d.categorie.push({ tipo: t, categoria: c })));
       d.categorie = d.categorie.filter(c => !(c.tipo === op.tipo && c.categoria === op.categoria));
       break;
+    case 'salvaRicorrente': {
+      d.ricorrenti = d.ricorrenti || [];
+      const i = d.ricorrenti.findIndex(x => x.id === op.id);
+      let ultimo = i >= 0 ? d.ricorrenti[i].ultimo : '';
+      if (i < 0) { const cor = oggiMese(); ultimo = (!op.arretrati && op.inizio.slice(0, 7) < cor) ? spostaMese(cor, -1) : ''; }
+      const r = { id: op.id, nome: op.nome, tipo: op.tipo, categoria: op.categoria, importo: Math.abs(op.importo), giorno: op.giorno,
+        inizio: op.inizio, fine: op.fine || '', attiva: op.attiva !== false, ultimo };
+      if (i >= 0) d.ricorrenti[i] = r; else d.ricorrenti.push(r);
+      break;
+    }
+    case 'interrompiRicorrente':
+      (d.ricorrenti || []).forEach(r => { if (r.id === op.id) { r.attiva = false; if (!r.fine || r.fine > op.data) r.fine = op.data; } });
+      break;
+    case 'riattivaRicorrente':
+      (d.ricorrenti || []).forEach(r => { if (r.id === op.id) { r.attiva = true; r.fine = op.fine || ''; const p = spostaMese(oggiMese(), -1); if (!r.ultimo || r.ultimo < p) r.ultimo = p; } });
+      break;
+    case 'eliminaRicorrente':
+      d.ricorrenti = (d.ricorrenti || []).filter(r => r.id !== op.id);
+      break;
   }
+  return generaLocale(d);
+}
+
+/* ========= Ricorrenze (stessa logica del foglio) ========= */
+const giorniNelMese = k => new Date(+k.slice(0, 4), +k.slice(5, 7), 0).getDate();
+const dataRata = (k, giorno) => k + '-' + pad(Math.min(giorno, giorniNelMese(k)));
+function scadenze(r, oggi) {
+  const out = [];
+  if (!r.attiva || !r.inizio) return out;
+  let k = r.inizio.slice(0, 7);
+  if (r.ultimo && spostaMese(r.ultimo, 1) > k) k = spostaMese(r.ultimo, 1);
+  for (let g = 0; k <= oggi.slice(0, 7) && g < 600; g++, k = spostaMese(k, 1)) {
+    const data = dataRata(k, r.giorno);
+    if (data > oggi || (r.fine && data > r.fine)) break;
+    if (data >= r.inizio) out.push({ mese: k, data });
+  }
+  return out;
+}
+function generaLocale(d) {
+  const oggi = oggiISO();
+  (d.ricorrenti || []).forEach(r => {
+    scadenze(r, oggi).forEach(s => {
+      const id = 'r' + r.id + '-' + s.mese;
+      if (!d.movimenti.some(m => m.id === id)) d.movimenti.push({ id, data: s.data, tipo: r.tipo, categoria: r.categoria, importo: r.importo, nota: r.nome });
+      r.ultimo = s.mese;
+    });
+  });
   return d;
 }
+function prossimaRata(r) {
+  if (!r.attiva) return null;
+  let k = r.inizio.slice(0, 7);
+  if (r.ultimo && spostaMese(r.ultimo, 1) > k) k = spostaMese(r.ultimo, 1);
+  for (let g = 0; g < 24; g++, k = spostaMese(k, 1)) {
+    const data = dataRata(k, r.giorno);
+    if (r.fine && data > r.fine) return null;
+    if (data >= r.inizio) return data;
+  }
+  return null;
+}
+const isRata = (m, r) => m.id.startsWith('r' + r.id + '-');
+const rateRegistrate = r => S.dati.movimenti.filter(m => isRata(m, r)).length;
+function rateTotali(r) {
+  if (!r.fine) return null;
+  let n = 0, k = r.inizio.slice(0, 7);
+  for (let g = 0; k <= r.fine.slice(0, 7) && g < 600; g++, k = spostaMese(k, 1)) { const dt = dataRata(k, r.giorno); if (dt >= r.inizio && dt <= r.fine) n++; }
+  return n;
+}
+function statoRic(r) {
+  if (r.attiva && (!r.fine || r.fine >= oggiISO())) return { t: 'Attiva', c: 'pos' };
+  if (!r.attiva) return { t: 'Interrotta', c: 'mut' };
+  return { t: 'Conclusa', c: 'mut' };
+}
+const dataIt = s => s ? s.slice(8, 10) + '/' + s.slice(5, 7) + '/' + s.slice(0, 4) : '';
 
 /* ================= Calcoli (stessa logica del foglio) ================= */
 function intervallo(da, a) { const out = []; let k = da; while (k <= a) { out.push(k); k = spostaMese(k, 1); } return out; }
@@ -290,7 +362,7 @@ async function sincronizza(silenzioso) {
     const ops = S.coda.slice();
     const j = ops.length ? await richiesta({ action: 'batch', ops }) : await richiesta(null);
     S.coda = S.coda.slice(ops.length);
-    S.dati = S.coda.reduce(applica, j.dati);
+    S.dati = S.coda.reduce(applica, Object.assign({ ricorrenti: [] }, j.dati));
     S.agg = Date.now();
     salvaLocale();
     if (j.errori && j.errori.length) toast('Attenzione: ' + j.errori[0]);
@@ -413,6 +485,14 @@ function vistaHome() {
   }
   h += `<div class="grid2"><div class="card kpi" onclick="vai('report')"><div class="l">Risparmio ${anno}</div><div class="v ${cls(eA - uA)}">${eur(eA - uA)}</div><div class="hint">${eA > 0 ? pct((eA - uA) / eA) + ' delle entrate' : '—'}</div></div>
     <div class="card kpi" onclick="vai('inv')"><div class="l">Investimenti</div><div class="v">${eur(tot.v)}</div><div class="hint ${cls(tot.v - tot.i)}">${segno(tot.v - tot.i)}</div></div></div>`;
+  const att = (S.dati.ricorrenti || []).filter(r => statoRic(r).t === 'Attiva');
+  if (att.length) {
+    const tu = att.filter(r => r.tipo === 'Uscita').reduce((a, r) => a + r.importo, 0), te = att.filter(r => r.tipo === 'Entrata').reduce((a, r) => a + r.importo, 0);
+    const pross = att.map(r => ({ r, d: prossimaRata(r) })).filter(x => x.d).sort((a, b) => a.d.localeCompare(b.d))[0];
+    h += `<div class="card" onclick="listaRicorrenti()" style="cursor:pointer"><div class="row"><h3 style="margin:0">↻ Ricorrenti attive: ${att.length}</h3><span class="mut">Gestisci ›</span></div>
+      <div class="sm" style="margin-top:6px">${tu ? `<span class="neg">−${eur(tu)}</span> al mese` : ''}${tu && te ? ' · ' : ''}${te ? `<span class="pos">+${eur(te)}</span> al mese` : ''}</div>
+      ${pross ? `<div class="hint">Prossima: ${esc(pross.r.nome)} il ${dataIt(pross.d)}</div>` : ''}</div>`;
+  }
   h += `<div class="day">Movimenti</div>`;
   if (!mov.length) h += `<div class="list"><div class="empty">Nessun movimento a ${nomeMese(k)}.<br>Tocca <b>+</b> per aggiungerne uno.</div></div>`;
   else {
@@ -426,7 +506,7 @@ function vistaHome() {
       }
       const inn = m.tipo === 'Entrata';
       h += `<div class="item" onclick="formMovimento('${esc(m.id)}')"><div class="ic ${inn ? 'in' : 'out'}">${esc((m.categoria || '?').charAt(0).toUpperCase())}</div>
-        <div class="mid"><b>${esc(m.categoria || 'Senza categoria')}</b><span>${esc(m.nota) || '&nbsp;'}</span></div><div class="amt ${inn ? 'pos' : ''}">${inn ? '+' : '−'}${eur(m.importo)}</div></div>`;
+        <div class="mid"><b>${/^r.+-\d{4}-\d{2}$/.test(m.id) ? '↻ ' : ''}${esc(m.categoria || 'Senza categoria')}</b><span>${esc(m.nota) || '&nbsp;'}</span></div><div class="amt ${inn ? 'pos' : ''}">${inn ? '+' : '−'}${eur(m.importo)}</div></div>`;
     });
     h += '</div>';
   }
@@ -481,7 +561,9 @@ function vistaReport() {
   let h = `<div class="nav"><button onclick="cambiaAnno(-1)">‹</button><div class="t">${a}</div><button onclick="cambiaAnno(1)">›</button></div>`;
   h += `<div class="card"><div class="mut sm">Risparmio ${a}</div><div class="big ${cls(A.risparmio)}">${segno(A.risparmio)}</div>
     <div class="grid2" style="margin-top:12px"><div class="kpi"><div class="l">Entrate</div><div class="v pos">${eur(A.entrate)}</div></div><div class="kpi"><div class="l">Uscite</div><div class="v neg">${eur(A.uscite)}</div></div>
-    <div class="kpi"><div class="l">Tasso di risparmio</div><div class="v">${pct(A.tassoRisparmio)}</div></div><div class="kpi"><div class="l">Spesa media mensile</div><div class="v">${eur(mesiConDati ? A.uscite / mesiConDati : 0)}</div></div></div></div>`;
+    <div class="kpi"><div class="l">Entrata media mensile</div><div class="v pos">${eur(mesiConDati ? A.entrate / mesiConDati : 0)}</div></div><div class="kpi"><div class="l">Spesa media mensile</div><div class="v neg">${eur(mesiConDati ? A.uscite / mesiConDati : 0)}</div></div>
+    <div class="kpi"><div class="l">Tasso di risparmio</div><div class="v">${pct(A.tassoRisparmio)}</div></div><div class="kpi"><div class="l">Risparmio medio mensile</div><div class="v ${cls(A.risparmio)}">${eur(mesiConDati ? A.risparmio / mesiConDati : 0)}</div></div></div>
+    <div class="hint">Medie calcolate sui ${mesiConDati} ${mesiConDati === 1 ? 'mese' : 'mesi'} del ${a} con movimenti.</div></div>`;
   h += `<div class="card"><h3>Entrate e uscite per mese</h3>${graficoBarre(MESI_B.map(m => m.charAt(0).toUpperCase()), [
     { nome: 'Entrate', valori: mesiA.map(k => perMese[k] ? perMese[k].entrate : 0), colore: C('green') },
     { nome: 'Uscite', valori: mesiA.map(k => perMese[k] ? perMese[k].uscite : 0), colore: C('red') }])}</div>`;
@@ -498,6 +580,11 @@ function vistaReport() {
     { nome: 'Valore', valori: storia.map(m => m.valore), colore: C('green'), spessore: 2.5, area: true },
     { nome: 'Investito netto', valori: storia.map(m => m.investito), colore: C('muted'), tratteggio: true }])}</div>`;
   if (R.annuale.length) {
+    const medie = R.annuale.slice().reverse().map(x => {
+      const n = R.mensile.filter(m => m.mese.slice(0, 4) === x.anno && (m.entrate || m.uscite)).length;
+      return `<tr><td><b>${x.anno}</b></td><td class="pos">${eur(n ? x.entrate / n : 0)}</td><td class="neg">${eur(n ? x.uscite / n : 0)}</td><td class="${cls(x.risparmio)}">${eur(n ? x.risparmio / n : 0)}</td></tr>`;
+    }).join('');
+    h += `<div class="card"><h3>Medie mensili per anno</h3><table class="t"><tr><th>Anno</th><th>Entrata</th><th>Spesa</th><th>Risparmio</th></tr>${medie}</table></div>`;
     h += `<div class="card"><h3>Confronto tra anni</h3><table class="t"><tr><th>Anno</th><th>Risparmio</th><th>G/P inv.</th><th>Rend.</th></tr>${R.annuale.slice().reverse().map(x => `<tr><td><b>${x.anno}</b></td><td class="${cls(x.risparmio)}">${eur(x.risparmio)}</td><td class="${cls(x.guadagnoAnno)}">${eur(x.guadagnoAnno)}</td><td class="${cls(x.twr)}">${pct(x.twr)}</td></tr>`).join('')}</table>
     ${R.annuale.length > 1 ? `<div style="margin-top:12px">${graficoBarre(R.annuale.map(x => x.anno), [{ nome: 'Risparmio', valori: R.annuale.map(x => x.risparmio), colore: C('blue') }, { nome: 'G/P investimenti', valori: R.annuale.map(x => x.guadagnoAnno), colore: C('gold') }], 150)}</div>` : ''}</div>`;
   }
@@ -512,6 +599,7 @@ function vistaSet() {
     <div class="btns" style="margin-top:14px"><button class="btn" onclick="salvaCfg()">Salva e prova</button></div>
     <p class="hint">${S.coda.length ? S.coda.length + ' operazioni in attesa di invio. ' : 'Nessuna operazione in attesa. '}${S.agg ? 'Ultima sincronizzazione: ' + new Date(S.agg).toLocaleString('it-IT') : ''}</p>
     <button class="btn sec" style="margin-top:10px" onclick="sincronizza(false)">Sincronizza ora</button></div>
+    <div class="card"><h3>Movimenti ricorrenti</h3><p class="hint" style="margin:0 0 10px">${(S.dati.ricorrenti || []).filter(r => statoRic(r).t === 'Attiva').length} attive su ${(S.dati.ricorrenti || []).length}</p><button class="btn sec" onclick="listaRicorrenti()">Gestisci ricorrenti</button></div>
     <div class="card"><h3>Categorie di uscita</h3><div class="chip-row">${cat('Uscita')}</div>
       <div class="row" style="margin-top:10px"><input class="in" id="nuovaU" placeholder="Nuova categoria di uscita"><button class="btn" style="width:auto" onclick="nuovaCategoria('Uscita','nuovaU')">+</button></div></div>
     <div class="card"><h3>Categorie di entrata</h3><div class="chip-row">${cat('Entrata')}</div>
@@ -534,19 +622,47 @@ let F = {};
 function formMovimento(id) {
   const m = id ? S.dati.movimenti.find(x => x.id === id) : null;
   const meseOggi = S.mese === oggiMese();
-  F = m ? Object.assign({}, m) : { id: null, tipo: 'Uscita', categoria: '', importo: '', data: meseOggi ? oggiISO() : S.mese + '-01', nota: '' };
+  F = m ? Object.assign({}, m) : { id: null, tipo: 'Uscita', categoria: '', importo: '', data: meseOggi ? oggiISO() : S.mese + '-01', nota: '',
+    ric: false, fineTipo: 'mai', nRate: '', fineData: '', arretrati: false };
   disegnaFormMovimento();
   if (!m) setTimeout(() => { const i = $('#fImp'); if (i) i.focus(); }, 280);
+}
+function leggiFormMov() {
+  const v = id => { const el = $(id); return el ? el.value : undefined; };
+  if (v('#fImp') !== undefined) F.importo = v('#fImp');
+  if (v('#fNota') !== undefined) F.nota = v('#fNota');
+  if (v('#fData') !== undefined) F.data = v('#fData');
+  if (v('#fNRate') !== undefined) F.nRate = v('#fNRate');
+  if (v('#fFineData') !== undefined) F.fineData = v('#fFineData');
+  const a = $('#fArr'); if (a) F.arretrati = a.checked;
+}
+function bloccoRicorrenza() {
+  if (F.id) return '';
+  let h = `<div class="switch"><span><b>↻ Ripeti ogni mese</b><br><span class="hint" style="margin:0">Rata, affitto, abbonamento, stipendio…</span></span>
+    <input type="checkbox" ${F.ric ? 'checked' : ''} onchange="leggiFormMov();F.ric=this.checked;disegnaFormMovimento()"></div>`;
+  if (!F.ric) return h;
+  const giorno = +(F.data || oggiISO()).slice(8, 10);
+  h += `<div class="card" style="background:var(--card2);box-shadow:none;margin-top:10px">
+    <div class="sm">Verrà registrata in automatico <b>ogni mese il giorno ${giorno}</b>${giorno > 28 ? ' (o l\'ultimo giorno del mese, se più corto)' : ''}, a partire dalla data indicata qui sotto.</div>
+    <label class="f">Quando finisce?</label>
+    <div class="seg">${[['mai', 'Mai'], ['rate', 'Dopo N rate'], ['data', 'In una data']].map(([k, l]) => `<button class="${F.fineTipo === k ? 'on' : ''}" onclick="leggiFormMov();F.fineTipo='${k}';disegnaFormMovimento()">${l}</button>`).join('')}</div>
+    ${F.fineTipo === 'rate' ? `<label class="f">Numero di rate totali</label><input class="in" id="fNRate" inputmode="numeric" placeholder="Es. 36 (3 anni)" value="${esc(F.nRate)}">` : ''}
+    ${F.fineTipo === 'data' ? `<label class="f">Ultima registrazione entro il</label><input class="in" type="date" id="fFineData" value="${esc(F.fineData)}">` : ''}
+    <p class="hint">Potrai interromperla quando vuoi da "Ricorrenti": le registrazioni già fatte restano.</p>
+    ${(F.data || '').slice(0, 7) < oggiMese() ? `<div class="switch"><span class="sm">Registra anche i mesi già passati<br><span class="hint" style="margin:0">Lascialo spento se quei mesi sono già nello storico (es. importati da BudJet)</span></span><input type="checkbox" id="fArr" ${F.arretrati ? 'checked' : ''}></div>` : ''}
+  </div>`;
+  return h;
 }
 function disegnaFormMovimento() {
   const cats = categorie(F.tipo);
   if (F.categoria && !cats.includes(F.categoria)) cats.push(F.categoria);
   apri(`<h2>${F.id ? 'Modifica movimento' : 'Nuovo movimento'}</h2>
-    <div class="seg" style="margin-top:10px"><button class="${F.tipo === 'Uscita' ? 'on out' : ''}" onclick="F.importo=$('#fImp').value;F.nota=$('#fNota').value;F.data=$('#fData').value;F.tipo='Uscita';F.categoria='';disegnaFormMovimento()">Uscita</button><button class="${F.tipo === 'Entrata' ? 'on in' : ''}" onclick="F.importo=$('#fImp').value;F.nota=$('#fNota').value;F.data=$('#fData').value;F.tipo='Entrata';F.categoria='';disegnaFormMovimento()">Entrata</button></div>
+    <div class="seg" style="margin-top:10px"><button class="${F.tipo === 'Uscita' ? 'on out' : ''}" onclick="leggiFormMov();F.tipo='Uscita';F.categoria='';disegnaFormMovimento()">Uscita</button><button class="${F.tipo === 'Entrata' ? 'on in' : ''}" onclick="leggiFormMov();F.tipo='Entrata';F.categoria='';disegnaFormMovimento()">Entrata</button></div>
     <input class="in amount ${F.tipo === 'Entrata' ? 'pos' : 'neg'}" id="fImp" inputmode="decimal" placeholder="0,00 €" value="${F.importo !== '' ? esc(String(F.importo).replace('.', ',')) : ''}">
     <label class="f">Categoria</label><div class="chip-row" id="fCat">${cats.map(c => `<button class="chip ${c === F.categoria ? 'on' : ''}" onclick="F.categoria=this.dataset.c;document.querySelectorAll('#fCat .chip').forEach(b=>b.classList.toggle('on',b===this))" data-c="${esc(c)}">${esc(c)}</button>`).join('')}</div>
-    <label class="f">Data</label><input class="in" type="date" id="fData" value="${esc(F.data)}">
-    <label class="f">Nota (facoltativa)</label><input class="in" id="fNota" value="${esc(F.nota)}" placeholder="Es. Esselunga, affitto ottobre…">
+    <label class="f">${F.ric ? 'Data della prima registrazione' : 'Data'}</label><input class="in" type="date" id="fData" value="${esc(F.data)}" onchange="if(F.ric){leggiFormMov();disegnaFormMovimento()}">
+    <label class="f">${F.ric ? 'Nome (es. Rata BMW, Netflix)' : 'Nota (facoltativa)'}</label><input class="in" id="fNota" value="${esc(F.nota)}" placeholder="${F.ric ? 'Es. Rata auto' : 'Es. Esselunga, affitto ottobre…'}">
+    ${bloccoRicorrenza()}
     <div class="btns" style="margin-top:18px"><button class="btn sec" onclick="chiudi()">Annulla</button><button class="btn" onclick="salvaMovimento()">Salva</button></div>
     ${F.id ? '<button class="btn danger" style="margin-top:8px" onclick="eliminaMovimento()">Elimina movimento</button>' : ''}`);
 }
@@ -555,10 +671,89 @@ function salvaMovimento() {
   if (!(imp > 0)) return toast('Inserisci un importo valido.');
   if (!F.categoria) return toast('Scegli una categoria.');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) return toast('Inserisci una data valida.');
+  if (F.ric && !F.id) return salvaNuovaRicorrenza(imp, data);
   esegui({ action: 'salvaMovimento', id: F.id || uid(), tipo: F.tipo, categoria: F.categoria, importo: Math.round(imp * 100) / 100, data, nota: $('#fNota').value.trim() });
   chiudi(); toast(F.id ? 'Movimento aggiornato' : 'Movimento salvato');
   S.mese = data.slice(0, 7); render();
 }
+function salvaNuovaRicorrenza(imp, data) {
+  leggiFormMov();
+  const nome = (F.nota || '').trim() || F.categoria;
+  const giorno = +data.slice(8, 10);
+  let fine = '';
+  if (F.fineTipo === 'rate') {
+    const n = parseInt(F.nRate, 10);
+    if (!(n >= 1 && n <= 600)) return toast('Indica quante rate in totale (es. 36).');
+    fine = dataRata(spostaMese(data.slice(0, 7), n - 1), giorno);
+  } else if (F.fineTipo === 'data') {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(F.fineData) || F.fineData < data) return toast('La data di fine deve essere dopo la prima registrazione.');
+    fine = F.fineData;
+  }
+  const arretrati = !!($('#fArr') && $('#fArr').checked);
+  const op = { action: 'salvaRicorrente', id: uid(), nome, tipo: F.tipo, categoria: F.categoria, importo: Math.round(imp * 100) / 100, giorno, inizio: data, fine, attiva: true, arretrati };
+  esegui(op);
+  chiudi();
+  const r = S.dati.ricorrenti.find(x => x.id === op.id), p = r && prossimaRata(r);
+  toast('Ricorrenza creata' + (p ? ': prossima registrazione il ' + dataIt(p) : ''));
+}
+
+/* ---------- Gestione ricorrenze ---------- */
+function listaRicorrenti() {
+  const L = (S.dati.ricorrenti || []).slice().sort((a, b) => {
+    const o = x => ({ Attiva: 0, Interrotta: 1, Conclusa: 2 })[statoRic(x).t];
+    return o(a) - o(b) || a.nome.localeCompare(b.nome);
+  });
+  const righe = L.map(r => {
+    const st = statoRic(r), n = rateRegistrate(r), tot = rateTotali(r), p = prossimaRata(r);
+    return `<div class="item" onclick="formRicorrente('${esc(r.id)}')" style="${st.t === 'Attiva' ? '' : 'opacity:.6'}">
+      <div class="ic ${r.tipo === 'Entrata' ? 'in' : 'out'}">↻</div>
+      <div class="mid"><b>${esc(r.nome)}</b><span>${esc(r.categoria)} · giorno ${r.giorno} · <span class="${st.c}">${st.t}</span></span>
+      <span>Registrate: ${n}${tot && r.attiva ? ' di ' + tot : ''}${p ? ' · prossima ' + dataIt(p) : ''}${!r.attiva && r.fine ? ' · ferma dal ' + dataIt(r.fine) : ''}</span></div>
+      <div class="amt ${r.tipo === 'Entrata' ? 'pos' : ''}">${r.tipo === 'Entrata' ? '+' : '−'}${eur(r.importo)}</div></div>`;
+  }).join('');
+  apri(`<h2>Ricorrenti</h2><p class="hint" style="margin-bottom:12px">Movimenti che si registrano da soli ogni mese. Interrompendoli, quelli già registrati restano nello storico.</p>
+    ${L.length ? `<div class="list">${righe}</div>` : '<div class="list"><div class="empty">Nessuna ricorrenza.<br>Creane una con <b>+</b> → "Ripeti ogni mese".</div></div>'}
+    <div class="btns"><button class="btn sec" onclick="chiudi()">Chiudi</button><button class="btn" onclick="chiudi();setTimeout(()=>{formMovimento();F.ric=true;disegnaFormMovimento()},260)">+ Nuova ricorrenza</button></div>`);
+}
+function formRicorrente(id) {
+  const r = S.dati.ricorrenti.find(x => x.id === id); if (!r) return;
+  F = Object.assign({ fineMai: !r.fine }, r);
+  const cats = categorie(r.tipo); if (r.categoria && !cats.includes(r.categoria)) cats.push(r.categoria);
+  const st = statoRic(r), n = rateRegistrate(r), tot = rateTotali(r);
+  apri(`<h2>${esc(r.nome)}</h2>
+    <div class="sm"><span class="${st.c}"><b>${st.t}</b></span> · ${r.tipo} · dal ${dataIt(r.inizio)}${r.fine ? ' al ' + dataIt(r.fine) : ''} · registrate ${n}${tot && r.attiva ? ' di ' + tot : ''}</div>
+    <label class="f">Nome</label><input class="in" id="rNome" value="${esc(r.nome)}">
+    <label class="f">Importo mensile</label><input class="in" id="rImp" inputmode="decimal" value="${esc(String(r.importo).replace('.', ','))}">
+    <label class="f">Categoria</label><div class="chip-row" id="rCat">${cats.map(c => `<button class="chip ${c === r.categoria ? 'on' : ''}" data-c="${esc(c)}" onclick="F.categoria=this.dataset.c;document.querySelectorAll('#rCat .chip').forEach(b=>b.classList.toggle('on',b===this))">${esc(c)}</button>`).join('')}</div>
+    <div class="grid2"><div><label class="f">Giorno del mese</label><input class="in" id="rGiorno" inputmode="numeric" value="${r.giorno}"></div>
+    <div><label class="f">Ultima registrazione entro</label><input class="in" type="date" id="rFine" value="${esc(r.fine)}"></div></div>
+    <p class="hint">Lascia vuota la data per non avere una fine. Le modifiche valgono per le prossime registrazioni: quelle passate non cambiano.</p>
+    <div class="btns" style="margin-top:16px"><button class="btn sec" onclick="chiudi()">Annulla</button><button class="btn" onclick="salvaRicorrenteModificata()">Salva</button></div>
+    ${r.attiva && st.t === 'Attiva' ? `<button class="btn sec" style="margin-top:10px;color:var(--red)" onclick="interrompiRic('${esc(r.id)}')">⏹ Interrompi da oggi</button>`
+      : `<button class="btn sec" style="margin-top:10px" onclick="riattivaRic('${esc(r.id)}')">▶︎ Riattiva</button>`}
+    <button class="btn danger" style="margin-top:4px" onclick="eliminaRic('${esc(r.id)}')">Elimina la regola</button>`);
+}
+function salvaRicorrenteModificata() {
+  const imp = numero($('#rImp').value), giorno = parseInt($('#rGiorno').value, 10), fine = $('#rFine').value, nome = $('#rNome').value.trim();
+  if (!nome) return toast('Inserisci un nome.');
+  if (!(imp > 0)) return toast('Inserisci un importo valido.');
+  if (!(giorno >= 1 && giorno <= 31)) return toast('Il giorno va da 1 a 31.');
+  if (fine && fine < F.inizio) return toast('La data di fine è prima dell\'inizio.');
+  esegui({ action: 'salvaRicorrente', id: F.id, nome, tipo: F.tipo, categoria: F.categoria, importo: Math.round(imp * 100) / 100, giorno, inizio: F.inizio, fine, attiva: F.attiva });
+  chiudi(); toast('Ricorrenza aggiornata');
+}
+function interrompiRic(id) {
+  if (!confirm('Interrompere questa ricorrenza da oggi?\n\nLe registrazioni già fatte restano nello storico; non ne verranno create di nuove.')) return;
+  esegui({ action: 'interrompiRicorrente', id, data: oggiISO() }); chiudi(); toast('Ricorrenza interrotta: lo storico è salvo');
+}
+function riattivaRic(id) {
+  esegui({ action: 'riattivaRicorrente', id, fine: '' }); chiudi(); toast('Ricorrenza riattivata dal mese corrente');
+}
+function eliminaRic(id) {
+  if (!confirm('Eliminare la regola?\n\nI movimenti già registrati restano; sparisce solo la ricorrenza dall\'elenco.')) return;
+  esegui({ action: 'eliminaRicorrente', id }); chiudi(); toast('Regola eliminata');
+}
+
 function eliminaMovimento() {
   if (!confirm('Eliminare questo movimento?')) return;
   esegui({ action: 'eliminaMovimento', id: F.id }); chiudi(); toast('Movimento eliminato');
