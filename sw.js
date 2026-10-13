@@ -1,5 +1,5 @@
 // Permette all'app di aprirsi anche senza connessione.
-const CACHE = 'finanze-v4';
+const CACHE = 'finanze-v7';
 const FILES = ['./', './index.html', './manifest.json', './icon-180.png', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {

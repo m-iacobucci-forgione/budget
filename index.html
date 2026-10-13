@@ -153,6 +153,7 @@ function numero(s) {
   let t = String(s).replace(/[€\s]/g, '');
   if (t === '') return NaN;
   if (t.includes(',')) t = t.replace(/\./g, '').replace(',', '.');
+  else if (/^-?\d{1,3}(\.\d{3})+$/.test(t)) t = t.replace(/\./g, '');  // "5.000" = cinquemila
   return parseFloat(t);
 }
 const load = (k, d) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } };
@@ -166,8 +167,8 @@ const S = {
   agg: load(K.agg, null),
   vista: 'home', mese: oggiMese(), anno: oggiMese().slice(0, 4), sync: false
 };
-['ricorrenti', 'conti', 'saldi'].forEach(k => { if (!S.dati[k]) S.dati[k] = []; });
-const TIPI_CONTO = ['Conto corrente', 'Contanti', 'Carta prepagata', 'Conto risparmio', 'Altro'];
+['ricorrenti', 'saldi'].forEach(k => { if (!S.dati[k]) S.dati[k] = []; });
+
 const salvaLocale = () => { store(K.dati, S.dati); store(K.coda, S.coda); store(K.agg, S.agg); };
 
 function categorie(tipo) {
@@ -180,7 +181,7 @@ function applica(d, op) {
   d = JSON.parse(JSON.stringify(d));
   switch (op.action) {
     case 'salvaMovimento': {
-      const m = { id: op.id, data: op.data, tipo: op.tipo, categoria: op.categoria, importo: Math.abs(op.importo), nota: op.nota || '' };
+      const m = { id: op.id, data: op.data, tipo: op.tipo, categoria: op.categoria || '', importo: Math.abs(op.importo), nota: op.nota || '', ins: op.ins || Date.now() };
       const i = d.movimenti.findIndex(x => x.id === op.id);
       if (i >= 0) d.movimenti[i] = m; else d.movimenti.push(m);
       break;
@@ -192,7 +193,7 @@ function applica(d, op) {
         const vuoto = (r.flusso === null || r.flusso === '') && (r.valore === null || r.valore === '');
         if (vuoto) { if (i >= 0) d.investimenti.splice(i, 1); return; }
         const s = d.strumenti.find(x => x.id === r.strumentoId);
-        const rec = { id: r.id || uid(), mese: op.mese, strumentoId: r.strumentoId, strumento: s ? s.nome : '', flusso: r.flusso || 0, valore: r.valore === null || r.valore === '' ? null : r.valore, nota: r.nota || '' };
+        const rec = { id: (i >= 0 && d.investimenti[i].id) || r.id || uid(), mese: op.mese, strumentoId: r.strumentoId, strumento: s ? s.nome : '', flusso: r.flusso || 0, valore: r.valore === null || r.valore === '' ? null : r.valore, nota: r.nota || '', ins: op.ins || Date.now() };
         if (i >= 0) d.investimenti[i] = rec; else d.investimenti.push(rec);
       });
       break;
@@ -229,19 +230,12 @@ function applica(d, op) {
     case 'eliminaRicorrente':
       d.ricorrenti = (d.ricorrenti || []).filter(r => r.id !== op.id);
       break;
-    case 'salvaConto': {
-      d.conti = d.conti || [];
-      const c = { id: op.id, nome: op.nome, tipologia: op.tipologia, attivo: op.attivo !== false, nota: op.nota || '' };
-      const i = d.conti.findIndex(x => x.id === op.id);
-      if (i >= 0) d.conti[i] = c; else d.conti.push(c);
-      break;
-    }
     case 'salvaSaldi':
       d.saldi = d.saldi || [];
       op.righe.forEach(r => {
         const i = d.saldi.findIndex(x => x.mese === op.mese && x.contoId === r.contoId);
         if (r.saldo === null || r.saldo === '') { if (i >= 0) d.saldi.splice(i, 1); return; }
-        const rec = { mese: op.mese, contoId: r.contoId, saldo: r.saldo, nota: '' };
+        const rec = { mese: op.mese, contoId: r.contoId, saldo: r.saldo, nota: '', ins: op.ins || Date.now() };
         if (i >= 0) d.saldi[i] = rec; else d.saldi.push(rec);
       });
       break;
@@ -269,12 +263,20 @@ function generaLocale(d) {
   (d.ricorrenti || []).forEach(r => {
     scadenze(r, oggi).forEach(s => {
       const id = 'r' + r.id + '-' + s.mese;
-      if (!d.movimenti.some(m => m.id === id)) d.movimenti.push({ id, data: s.data, tipo: r.tipo, categoria: r.categoria, importo: r.importo, nota: r.nome });
+      if (r.tipo === 'Versamento') { versamentoLocale(d, r.categoria, s.mese, r.importo, id); r.ultimo = s.mese; return; }
+      if (!d.movimenti.some(m => m.id === id)) d.movimenti.push({ id, data: s.data, tipo: r.tipo, categoria: r.categoria, importo: r.importo, nota: r.nome, ins: Date.now() });
       r.ultimo = s.mese;
     });
   });
   return d;
 }
+function versamentoLocale(d, sid, mese, importo, id) {
+  const x = d.investimenti.find(i => i.mese === mese && i.strumentoId === sid);
+  if (x) { if (x.flusso) return; x.flusso = importo; if (x.valore !== null) x.valore += importo; x.id = id; x.ins = Date.now(); return; }
+  const s = d.strumenti.find(z => z.id === sid);
+  d.investimenti.push({ id, mese, strumentoId: sid, strumento: s ? s.nome : '', flusso: importo, valore: null, nota: 'Versamento automatico', ins: Date.now() });
+}
+const pacDi = sid => (S.dati.ricorrenti || []).find(r => r.tipo === 'Versamento' && r.categoria === sid);
 function prossimaRata(r) {
   if (!r.attiva) return null;
   let k = r.inizio.slice(0, 7);
@@ -287,7 +289,7 @@ function prossimaRata(r) {
   return null;
 }
 const isRata = (m, r) => m.id.startsWith('r' + r.id + '-');
-const rateRegistrate = r => S.dati.movimenti.filter(m => isRata(m, r)).length;
+const rateRegistrate = r => r.tipo === 'Versamento' ? S.dati.investimenti.filter(i => (i.id || '').startsWith('r' + r.id + '-')).length : S.dati.movimenti.filter(m => isRata(m, r)).length;
 function rateTotali(r) {
   if (!r.fine) return null;
   let n = 0, k = r.inizio.slice(0, 7);
@@ -304,6 +306,37 @@ const dataIt = s => s ? s.slice(8, 10) + '/' + s.slice(5, 7) + '/' + s.slice(0, 
 /* ================= Calcoli (stessa logica del foglio) ================= */
 function intervallo(da, a) { const out = []; let k = da; while (k <= a) { out.push(k); k = spostaMese(k, 1); } return out; }
 
+/* ---------- Saldi dei conti: ultimo saldo inserito + movimenti successivi (stessa logica del foglio) ---------- */
+const ultimoGiorno = k => k + '-' + pad(giorniNelMeseK(k));
+const giorniNelMeseK = k => new Date(+k.slice(0, 4), +k.slice(5, 7), 0).getDate();
+const isoDaTs = t => { const x = new Date(t); return x.getFullYear() + '-' + pad(x.getMonth() + 1) + '-' + pad(x.getDate()); };
+function rifSaldo(s) {
+  if (s.ins) { const dd = isoDaTs(s.ins); if (dd.slice(0, 7) === s.mese) return { d: dd, t: s.ins }; }
+  return { d: ultimoGiorno(s.mese), t: Infinity };
+}
+/** Liquidità alla data = ultima liquidità inserita + entrate − uscite successive − versamenti negli investimenti successivi */
+function liquiditaAl(fino, d) {
+  let base = null, rif = null;
+  (d.saldi || []).forEach(s => {
+    if (s.contoId !== 'LIQ') return;
+    const r = rifSaldo(s);
+    if (r.d > fino) return;
+    if (!rif || r.d > rif.d || (r.d === rif.d && r.t > rif.t)) { rif = r; base = s.saldo; }
+  });
+  if (!rif) return null;
+  let ent = 0, usc = 0, inv = 0;
+  d.movimenti.forEach(m => {
+    if (m.data > fino || !(m.data > rif.d || (m.data === rif.d && (m.ins || 0) > rif.t))) return;
+    if (m.tipo === 'Entrata') ent += m.importo; else if (m.tipo === 'Uscita') usc += m.importo;
+  });
+  const mr = rif.d.slice(0, 7);
+  d.investimenti.forEach(i => {
+    if (i.mese > fino.slice(0, 7)) return;
+    if (i.mese > mr || (i.mese === mr && (i.ins || 0) > rif.t)) inv += i.flusso || 0;
+  });
+  return { valore: Math.round((base + ent - usc - inv) * 100) / 100, rif, ent, usc, inv, base };
+}
+
 function calcola(d) {
   const oggi = oggiMese();
   const set = new Set();
@@ -311,11 +344,10 @@ function calcola(d) {
   d.investimenti.forEach(i => set.add(i.mese));
   (d.saldi || []).forEach(x => set.add(x.mese));
   const el = [...set].sort();
-  const saldiPC = {}, saldoC = {}, meseC = {};
-  (d.saldi || []).forEach(x => { (saldiPC[x.contoId] = saldiPC[x.contoId] || {})[x.mese] = x.saldo; });
+  const oggiD = oggiISO();
   const mesi = el.length ? intervallo(el[0], el[el.length - 1] > oggi ? el[el.length - 1] : oggi) : [];
   const ent = {}, usc = {};
-  d.movimenti.forEach(m => { const k = m.data.slice(0, 7); if (m.tipo === 'Entrata') ent[k] = (ent[k] || 0) + m.importo; else usc[k] = (usc[k] || 0) + m.importo; });
+  d.movimenti.forEach(m => { const k = m.data.slice(0, 7); if (m.tipo === 'Entrata') ent[k] = (ent[k] || 0) + m.importo; else if (m.tipo === 'Uscita') usc[k] = (usc[k] || 0) + m.importo; });
   const perStr = {};
   d.investimenti.forEach(i => { (perStr[i.strumentoId] = perStr[i.strumentoId] || {})[i.mese] = i; });
   const stato = {};
@@ -333,11 +365,8 @@ function calcola(d) {
     const variazione = valore - valPrec - fl, base = valPrec + fl;
     const rendimento = base > 0 ? variazione / base : 0;
     valPrec = valore;
-    let liquidita = 0;
-    Object.keys(saldiPC).forEach(cid => {
-      if (saldiPC[cid][k] !== undefined) { saldoC[cid] = saldiPC[cid][k]; meseC[cid] = k; }
-      if (saldoC[cid] !== undefined) liquidita += saldoC[cid];
-    });
+    const fineK = k < oggiD.slice(0, 7) ? ultimoGiorno(k) : oggiD;
+    const lq = liquiditaAl(fineK, d), liquidita = lq ? lq.valore : 0;
     const e = ent[k] || 0, u = usc[k] || 0;
     return { mese: k, entrate: e, uscite: u, risparmio: e - u, investito, valore, guadagno: valore - investito, flusso: fl, variazione, rendimento, liquidita, patrimonio: liquidita + valore };
   });
@@ -362,9 +391,7 @@ function calcola(d) {
     return { id: sid, nome: i.nome || (primo && primo.strumento) || sid, tipologia: i.tipologia || 'Altro', attivo: i.attivo !== false,
       investito: s.investito, valore: s.valore, guadagno: g, rendimento: s.versamenti > 0 ? g / s.versamenti : 0, ultimoMese: s.ultimoMese };
   }).sort((a, b) => b.valore - a.valore);
-  const conti = (d.conti || []).map(c => ({ ...c, saldo: saldoC[c.id] || 0, ultimoMese: meseC[c.id] || null }))
-    .sort((a, b) => (b.attivo - a.attivo) || (b.saldo - a.saldo));
-  return { mensile, annuale, portafoglio, conti };
+  return { mensile, annuale, portafoglio, liquidita: liquiditaAl(oggiD, d) };
 }
 
 /* ================= Sincronizzazione con il foglio ================= */
@@ -496,7 +523,7 @@ function bannerCollega() {
 
 function vistaHome() {
   const k = S.mese;
-  const mov = S.dati.movimenti.filter(m => m.data.slice(0, 7) === k).sort((a, b) => b.data.localeCompare(a.data));
+  const mov = S.dati.movimenti.filter(m => m.data.slice(0, 7) === k && (m.tipo === 'Entrata' || m.tipo === 'Uscita')).sort((a, b) => b.data.localeCompare(a.data));
   const e = mov.filter(m => m.tipo === 'Entrata').reduce((s, m) => s + m.importo, 0);
   const u = mov.filter(m => m.tipo === 'Uscita').reduce((s, m) => s + m.importo, 0);
   const anno = k.slice(0, 4);
@@ -521,13 +548,13 @@ function vistaHome() {
     h += `<div class="card"><h3>Dove sono andati i soldi</h3>${top.map(([c, v]) => `<div class="cat-row"><div class="row"><span>${esc(c)}</span><b>${eur(v)}</b></div><div class="bar"><i style="width:${v / top[0][1] * 100}%;background:var(--red);opacity:.75"></i></div></div>`).join('')}</div>`;
   }
   h += `<div class="grid2"><div class="card kpi" onclick="vai('report')"><div class="l">Risparmio ${anno}</div><div class="v ${cls(eA - uA)}">${eur(eA - uA)}</div><div class="hint">${eA > 0 ? pct((eA - uA) / eA) + ' delle entrate' : '—'}</div></div>
-    <div class="card kpi" onclick="vai('inv')"><div class="l">Patrimonio</div><div class="v">${eur(tot.v + R.conti.filter(c => c.attivo).reduce((a, c) => a + c.saldo, 0))}</div><div class="hint">di cui investiti ${eur(tot.v)}</div></div></div>`;
+    <div class="card kpi" onclick="vai('inv')"><div class="l">Patrimonio</div><div class="v">${eur(tot.v + (R.liquidita ? R.liquidita.valore : 0))}</div><div class="hint">${R.liquidita ? 'di cui investiti ' + eur(tot.v) : 'Imposta la liquidità ›'}</div></div></div>`;
   const att = (S.dati.ricorrenti || []).filter(r => statoRic(r).t === 'Attiva');
   if (att.length) {
-    const tu = att.filter(r => r.tipo === 'Uscita').reduce((a, r) => a + r.importo, 0), te = att.filter(r => r.tipo === 'Entrata').reduce((a, r) => a + r.importo, 0);
+    const tu = att.filter(r => r.tipo === 'Uscita').reduce((a, r) => a + r.importo, 0), te = att.filter(r => r.tipo === 'Entrata').reduce((a, r) => a + r.importo, 0), tv = att.filter(r => r.tipo === 'Versamento').reduce((a, r) => a + r.importo, 0);
     const pross = att.map(r => ({ r, d: prossimaRata(r) })).filter(x => x.d).sort((a, b) => a.d.localeCompare(b.d))[0];
     h += `<div class="card" onclick="listaRicorrenti()" style="cursor:pointer"><div class="row"><h3 style="margin:0">↻ Ricorrenti attive: ${att.length}</h3><span class="mut">Gestisci ›</span></div>
-      <div class="sm" style="margin-top:6px">${tu ? `<span class="neg">−${eur(tu)}</span> al mese` : ''}${tu && te ? ' · ' : ''}${te ? `<span class="pos">+${eur(te)}</span> al mese` : ''}</div>
+      <div class="sm" style="margin-top:6px">${tu ? `<span class="neg">−${eur(tu)}</span> al mese` : ''}${tu && te ? ' · ' : ''}${te ? `<span class="pos">+${eur(te)}</span> al mese` : ''}${tv ? `${tu || te ? ' · ' : ''}${eur(tv)} investiti al mese` : ''}</div>
       ${pross ? `<div class="hint">Prossima: ${esc(pross.r.nome)} il ${dataIt(pross.d)}</div>` : ''}</div>`;
   }
   h += `<div class="day">Movimenti</div>`;
@@ -556,36 +583,36 @@ function vistaInv() {
   const tot = P.reduce((a, p) => ({ v: a.v + p.valore, i: a.i + p.investito, g: a.g + p.guadagno }), { v: 0, i: 0, g: 0 });
   const versLordi = S.dati.investimenti.reduce((s, x) => s + (x.flusso > 0 ? x.flusso : 0), 0);
   const annoC = R.annuale.find(a => a.anno === oggiMese().slice(0, 4));
-  const contiAtt = R.conti.filter(c => c.attivo || c.saldo);
-  const liq = R.conti.reduce((a, c) => a + c.saldo, 0);
+  const L = R.liquidita, liq = L ? L.valore : 0;
   const patr = liq + tot.v;
   const mm = R.mensile;
   const fineAnnoPrec = mm.filter(m => m.mese < oggiMese().slice(0, 4) + '-01').slice(-1)[0];
-  const varAnno = fineAnnoPrec && fineAnnoPrec.patrimonio ? patr - fineAnnoPrec.patrimonio : null;
+  const varAnno = fineAnnoPrec && fineAnnoPrec.patrimonio && fineAnnoPrec.liquidita ? patr - fineAnnoPrec.patrimonio : null;
   let h = bannerCollega();
   h += `<div class="card"><div class="mut sm">Patrimonio totale</div><div class="big">${eur(patr)}</div>
     ${varAnno !== null ? `<div class="sm ${cls(varAnno)}" style="margin-top:2px">${segno(varAnno)} da inizio anno</div>` : ''}
-    <div class="bar" style="margin-top:12px;display:flex">${patr > 0 ? `<i style="width:${liq / patr * 100}%;background:var(--blue);border-radius:0"></i><i style="width:${tot.v / patr * 100}%;background:var(--green);border-radius:0"></i>` : ''}</div>
+    <div class="bar" style="margin-top:12px;display:flex">${patr > 0 ? `<i style="width:${Math.max(0, liq) / patr * 100}%;background:var(--blue);border-radius:0"></i><i style="width:${tot.v / patr * 100}%;background:var(--green);border-radius:0"></i>` : ''}</div>
     <div class="grid2" style="margin-top:10px">
-      <div class="kpi"><div class="l"><span style="color:var(--blue)">●</span> Conti e contanti</div><div class="v">${eur(liq)}</div></div>
+      <div class="kpi" onclick="formLiquidita()" style="cursor:pointer"><div class="l"><span style="color:var(--blue)">●</span> Liquidità</div><div class="v ${liq < 0 ? 'neg' : ''}">${L ? eur(liq) : '—'}</div></div>
       <div class="kpi"><div class="l"><span style="color:var(--green)">●</span> Investimenti</div><div class="v">${eur(tot.v)}</div></div>
     </div></div>`;
+  if (!L) {
+    h += `<div class="banner"><b>Imposta la tua liquidità di partenza</b><br>Somma quello che hai oggi su tutti i conti e in contanti e inseriscilo una volta. Da lì si aggiorna da sola con le entrate e le uscite che registri.
+      <button class="btn" style="margin-top:10px" onclick="formLiquidita()">Imposta liquidità</button></div>`;
+  } else {
+    h += `<div class="card" onclick="formLiquidita()" style="cursor:pointer"><div class="row"><h3 style="margin:0">Liquidità</h3><span class="mut sm">Correggi ›</span></div>
+      <div class="sm" style="margin-top:8px;line-height:1.7">Inserita il ${dataIt(L.rif.d)}: <b>${eur(L.base)}</b><br>
+      <span class="pos">+ ${eur(L.ent)}</span> entrate · <span class="neg">− ${eur(L.usc)}</span> uscite${L.inv ? ` · − ${eur(L.inv)} versati negli investimenti` : ''}<br>
+      = <b>${eur(liq)}</b></div>
+      <p class="hint">Ogni tanto confrontala con la somma di conti e contanti e, se serve, correggila.</p></div>`;
+  }
   const storia = mm.filter(m => m.patrimonio).slice(-36);
   if (storia.length > 1) {
     h += `<div class="card"><h3>Andamento del patrimonio</h3>${graficoLinee(storia.map(m => etMese(m.mese)), [
       { nome: 'Totale', valori: storia.map(m => m.patrimonio), colore: C('text'), spessore: 2.5, area: true },
-      { nome: 'Conti e contanti', valori: storia.map(m => m.liquidita), colore: C('blue') },
+      { nome: 'Liquidità', valori: storia.map(m => m.liquidita), colore: C('blue') },
       { nome: 'Investimenti', valori: storia.map(m => m.valore), colore: C('green') }])}</div>`;
   }
-  h += `<div class="day">Conti e contanti</div>`;
-  if (!contiAtt.length) h += `<div class="list"><div class="empty">Aggiungi il tuo conto corrente, i contanti o una carta prepagata<br>con <b>+ Conto</b>, poi indica il saldo.</div></div>`;
-  else {
-    h += `<div class="list">${contiAtt.map(c => `<div class="item" onclick="formConto('${esc(c.id)}')" style="${c.attivo ? '' : 'opacity:.55'}"><div class="ic" style="background:color-mix(in srgb,var(--blue) 14%,transparent);color:var(--blue)">${c.tipologia === 'Contanti' ? '€' : '▤'}</div>
-      <div class="mid"><b>${esc(c.nome)}</b><span>${esc(c.tipologia)}${c.ultimoMese ? ' · saldo di ' + etMese(c.ultimoMese) : ' · saldo non inserito'}</span></div><div class="amt">${eur(c.saldo)}</div></div>`).join('')}</div>`;
-    const vecchi = contiAtt.filter(c => c.attivo && c.ultimoMese && c.ultimoMese < oggiMese());
-    if (vecchi.length) h += `<p class="hint" style="margin:-4px 4px 10px">Alcuni saldi sono di mesi precedenti: tocca "Aggiorna saldi" per il mese in corso.</p>`;
-  }
-  h += `<div class="btns" style="margin-bottom:18px"><button class="btn" onclick="formSaldi()">Aggiorna saldi</button><button class="btn sec" onclick="formConto()">+ Conto</button></div>`;
   h += `<div class="day">Investimenti</div>`;
   h += `<div class="card"><div class="mut sm">Valore investimenti</div><div class="big" style="font-size:28px">${eur(tot.v)}</div>
     <div class="grid2" style="margin-top:12px">
@@ -606,7 +633,7 @@ function vistaInv() {
     h += `<div class="day">Strumenti</div><div class="list">`;
     P.forEach(p => {
       const quota = tot.v > 0 ? p.valore / tot.v : 0;
-      h += `<div class="item" onclick="formStrumento('${esc(p.id)}')" style="${p.attivo ? '' : 'opacity:.55'}"><div class="mid"><b>${esc(p.nome)}</b><span><span class="tag">${esc(p.tipologia)}</span> ${pct(quota).replace(',00', '')} del portafoglio${p.ultimoMese ? ' · agg. ' + etMese(p.ultimoMese) : ''}</span></div>
+      h += `<div class="item" onclick="formStrumento('${esc(p.id)}')" style="${p.attivo ? '' : 'opacity:.55'}"><div class="mid"><b>${esc(p.nome)}</b><span><span class="tag">${esc(p.tipologia)}</span> ${pct(quota).replace(',00', '')} del portafoglio${(() => { const pc = pacDi(p.id); return pc && statoRic(pc).t === 'Attiva' ? ' · ↗ ' + eur(pc.importo) + '/mese' : ''; })()}${p.ultimoMese ? ' · agg. ' + etMese(p.ultimoMese) : ''}</span></div>
         <div style="text-align:right"><div class="amt">${eur(p.valore)}</div><div class="sm ${cls(p.guadagno)}">${segno(p.guadagno)} · ${pct(p.rendimento)}</div></div></div>`;
     });
     h += '</div>';
@@ -614,62 +641,21 @@ function vistaInv() {
   return h;
 }
 
-/* ---------- Conti e saldi ---------- */
-function formConto(id) {
-  const c = id ? S.dati.conti.find(x => x.id === id) : null;
-  F = c ? Object.assign({}, c) : { id: null, nome: '', tipologia: 'Conto corrente', attivo: true, nota: '' };
-  apri(`<h2>${c ? 'Modifica conto' : 'Nuovo conto'}</h2>
-    <label class="f">Nome</label><input class="in" id="cNome" value="${esc(F.nome)}" placeholder="Es. Conto Intesa, Contanti, Hype">
-    <label class="f">Tipo</label><select class="in" id="cTipo">${TIPI_CONTO.map(t => `<option ${t === F.tipologia ? 'selected' : ''}>${t}</option>`).join('')}</select>
-    ${c ? `<div class="switch"><span>Ancora in uso</span><input type="checkbox" id="cAtt" ${F.attivo ? 'checked' : ''}></div><p class="hint">Se chiudi il conto, inserisci saldo 0 nel mese di chiusura e poi disattivalo: lo storico resta.</p>`
-      : `<label class="f">Saldo attuale</label><input class="in" id="cSaldo" inputmode="decimal" placeholder="0,00 €"><p class="hint">Verrà registrato come saldo di ${nomeMese(oggiMese())}.</p>`}
-    <div class="btns" style="margin-top:18px"><button class="btn sec" onclick="chiudi()">Annulla</button><button class="btn" onclick="salvaConto()">Salva</button></div>
-    ${c ? `<button class="btn sec" style="margin-top:10px" onclick="chiudi();setTimeout(()=>formSaldi(),260)">Aggiorna saldi</button>` : ''}`);
+/* ---------- Liquidità ---------- */
+function formLiquidita() {
+  const L = calcola(S.dati).liquidita;
+  apri(`<h2>${L ? 'Correggi la liquidità' : 'Imposta la liquidità'}</h2>
+    <p class="hint">Somma quello che hai <b>oggi</b> su tutti i conti bancari e in contanti. Da questo valore l'app riparte e lo aggiorna con le entrate e le uscite che registrerai.</p>
+    ${L ? `<p class="sm">Valore attuale calcolato dall'app: <b>${eur(L.valore)}</b></p>` : ''}
+    <label class="f">Liquidità totale di oggi</label><input class="in amount" id="lqVal" inputmode="decimal" placeholder="0,00 €">
+    <div class="btns" style="margin-top:18px"><button class="btn sec" onclick="chiudi()">Annulla</button><button class="btn" onclick="salvaLiquidita()">Salva</button></div>`);
+  setTimeout(() => { const i = $('#lqVal'); if (i) i.focus(); }, 280);
 }
-function salvaConto() {
-  const nome = $('#cNome').value.trim();
-  if (!nome) return toast('Inserisci un nome.');
-  const id = F.id || uid();
-  esegui({ action: 'salvaConto', id, nome, tipologia: $('#cTipo').value, attivo: F.id ? $('#cAtt').checked : true, nota: '' });
-  if (!F.id) {
-    const v = numero($('#cSaldo').value);
-    if (!isNaN(v)) esegui({ action: 'salvaSaldi', mese: oggiMese(), righe: [{ contoId: id, saldo: v }] });
-  }
-  chiudi(); toast('Conto salvato');
-}
-function formSaldi(mese) {
-  mese = mese || oggiMese();
-  const attivi = S.dati.conti.filter(c => c.attivo !== false);
-  if (!attivi.length) return formConto();
-  const R = calcola({ ...S.dati, saldi: S.dati.saldi.filter(x => x.mese < mese) });
-  const prec = {}; R.conti.forEach(c => prec[c.id] = c.saldo);
-  const righe = attivi.map(c => {
-    const r = S.dati.saldi.find(x => x.mese === mese && x.contoId === c.id);
-    return `<div class="inv-row" data-id="${esc(c.id)}"><div class="row"><b>${esc(c.nome)}</b><span class="tag">${esc(c.tipologia)}</span></div>
-      <label class="f" style="margin-top:8px">Saldo a fine mese (o di oggi)</label><input class="in sa" inputmode="decimal" placeholder="${prec[c.id] !== undefined && prec[c.id] !== 0 ? esc(eur(prec[c.id])) : '0,00 €'}" value="${r ? esc(String(r.saldo).replace('.', ',')) : ''}"></div>`;
-  }).join('');
-  apri(`<h2>Aggiorna saldi</h2>
-    <div class="nav" style="margin:10px 0 4px"><button onclick="formSaldi('${spostaMese(mese, -1)}')">‹</button><div class="t">${nomeMese(mese)}</div><button onclick="formSaldi('${spostaMese(mese, 1)}')" ${mese >= oggiMese() ? 'disabled style="opacity:.3"' : ''}>›</button></div>
-    <input type="hidden" id="sMese" value="${mese}">
-    <p class="hint">Scrivi quanto c'è su ogni conto (lo vedi nell'app della banca) e quanti contanti hai. Il valore grigio è l'ultimo inserito. Puoi tornare ai mesi passati con ‹.</p>
-    <div style="margin-top:6px">${righe}</div>
-    <div class="btns" style="margin-top:18px"><button class="btn sec" onclick="chiudi()">Annulla</button><button class="btn" onclick="salvaSaldi()">Salva</button></div>`);
-}
-function salvaSaldi() {
-  const mese = $('#sMese').value, righe = [];
-  let errore = false;
-  document.querySelectorAll('.inv-row').forEach(el => {
-    const cid = el.dataset.id, vs = el.querySelector('.sa').value.trim();
-    const esiste = S.dati.saldi.some(x => x.mese === mese && x.contoId === cid);
-    const v = vs === '' ? null : numero(vs.replace('−', '-'));
-    if (v !== null && isNaN(v)) { errore = true; return; }
-    if (v === null && !esiste) return;
-    righe.push({ contoId: cid, saldo: v });
-  });
-  if (errore) return toast('Controlla i numeri inseriti.');
-  if (!righe.length) return toast('Nessun saldo inserito.');
-  esegui({ action: 'salvaSaldi', mese, righe });
-  chiudi(); toast('Saldi di ' + nomeMese(mese) + ' salvati');
+function salvaLiquidita() {
+  const v = numero($('#lqVal').value.replace('−', '-'));
+  if (isNaN(v)) return toast('Inserisci un importo.');
+  esegui({ action: 'salvaSaldi', mese: oggiMese(), righe: [{ contoId: 'LIQ', saldo: Math.round(v * 100) / 100 }], ins: Date.now() });
+  chiudi(); toast('Liquidità aggiornata');
 }
 
 /* ---------- Storico mese per mese di uno strumento ---------- */
@@ -719,7 +705,7 @@ function salvaStorico() {
     if (f === null && v === null && !r) return;
     if (f === null && v !== null) f = 0;
     if (r && (f || 0) === (prima[0] || 0) && v === prima[1]) return;
-    ops.push({ action: 'salvaInvestimenti', mese: k, righe: [{ strumentoId: id, flusso: f, valore: v }] }); n++;
+    ops.push({ action: 'salvaInvestimenti', mese: k, righe: [{ strumentoId: id, flusso: f, valore: v }], ins: Date.now() }); n++;
   });
   if (errore) return toast('Controlla i numeri inseriti.');
   if (!ops.length) return toast('Nessuna modifica.');
@@ -837,8 +823,9 @@ function bloccoRicorrenza() {
 function disegnaFormMovimento() {
   const cats = categorie(F.tipo);
   if (F.categoria && !cats.includes(F.categoria)) cats.push(F.categoria);
+  const seg = (t, cl) => `<button class="${F.tipo === t ? 'on ' + cl : ''}" onclick="leggiFormMov();F.tipo='${t}';F.categoria='';disegnaFormMovimento()">${t}</button>`;
   apri(`<h2>${F.id ? 'Modifica movimento' : 'Nuovo movimento'}</h2>
-    <div class="seg" style="margin-top:10px"><button class="${F.tipo === 'Uscita' ? 'on out' : ''}" onclick="leggiFormMov();F.tipo='Uscita';F.categoria='';disegnaFormMovimento()">Uscita</button><button class="${F.tipo === 'Entrata' ? 'on in' : ''}" onclick="leggiFormMov();F.tipo='Entrata';F.categoria='';disegnaFormMovimento()">Entrata</button></div>
+    <div class="seg" style="margin-top:10px">${seg('Uscita', 'out')}${seg('Entrata', 'in')}</div>
     <input class="in amount ${F.tipo === 'Entrata' ? 'pos' : 'neg'}" id="fImp" inputmode="decimal" placeholder="0,00 €" value="${F.importo !== '' ? esc(String(F.importo).replace('.', ',')) : ''}">
     <label class="f">Categoria</label><div class="chip-row" id="fCat">${cats.map(c => `<button class="chip ${c === F.categoria ? 'on' : ''}" onclick="F.categoria=this.dataset.c;document.querySelectorAll('#fCat .chip').forEach(b=>b.classList.toggle('on',b===this))" data-c="${esc(c)}">${esc(c)}</button>`).join('')}</div>
     <label class="f">${F.ric ? 'Data della prima registrazione' : 'Data'}</label><input class="in" type="date" id="fData" value="${esc(F.data)}" onchange="if(F.ric){leggiFormMov();disegnaFormMovimento()}">
@@ -848,12 +835,14 @@ function disegnaFormMovimento() {
     ${F.id ? '<button class="btn danger" style="margin-top:8px" onclick="eliminaMovimento()">Elimina movimento</button>' : ''}`);
 }
 function salvaMovimento() {
+  leggiFormMov();
   const imp = numero($('#fImp').value), data = $('#fData').value;
   if (!(imp > 0)) return toast('Inserisci un importo valido.');
   if (!F.categoria) return toast('Scegli una categoria.');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) return toast('Inserisci una data valida.');
   if (F.ric && !F.id) return salvaNuovaRicorrenza(imp, data);
-  esegui({ action: 'salvaMovimento', id: F.id || uid(), tipo: F.tipo, categoria: F.categoria, importo: Math.round(imp * 100) / 100, data, nota: $('#fNota').value.trim() });
+  esegui({ action: 'salvaMovimento', id: F.id || uid(), tipo: F.tipo, categoria: F.categoria, importo: Math.round(imp * 100) / 100, data,
+    nota: $('#fNota').value.trim(), ins: F.ins || Date.now() });
   chiudi(); toast(F.id ? 'Movimento aggiornato' : 'Movimento salvato');
   S.mese = data.slice(0, 7); render();
 }
@@ -886,11 +875,12 @@ function listaRicorrenti() {
   });
   const righe = L.map(r => {
     const st = statoRic(r), n = rateRegistrate(r), tot = rateTotali(r), p = prossimaRata(r);
-    return `<div class="item" onclick="formRicorrente('${esc(r.id)}')" style="${st.t === 'Attiva' ? '' : 'opacity:.6'}">
-      <div class="ic ${r.tipo === 'Entrata' ? 'in' : 'out'}">↻</div>
-      <div class="mid"><b>${esc(r.nome)}</b><span>${esc(r.categoria)} · giorno ${r.giorno} · <span class="${st.c}">${st.t}</span></span>
+    const vers = r.tipo === 'Versamento';
+    return `<div class="item" onclick="${vers ? `chiudi();setTimeout(()=>formPac('${esc(r.categoria)}'),260)` : `formRicorrente('${esc(r.id)}')`}" style="${st.t === 'Attiva' ? '' : 'opacity:.6'}">
+      <div class="ic ${r.tipo === 'Entrata' ? 'in' : vers ? '' : 'out'}" style="${vers ? 'background:color-mix(in srgb,var(--green) 15%,transparent);color:var(--green)' : ''}">${vers ? '↗' : '↻'}</div>
+      <div class="mid"><b>${esc(r.nome)}</b><span>${vers ? 'Versamento automatico' : esc(r.categoria)} · giorno ${r.giorno} · <span class="${st.c}">${st.t}</span></span>
       <span>Registrate: ${n}${tot && r.attiva ? ' di ' + tot : ''}${p ? ' · prossima ' + dataIt(p) : ''}${!r.attiva && r.fine ? ' · ferma dal ' + dataIt(r.fine) : ''}</span></div>
-      <div class="amt ${r.tipo === 'Entrata' ? 'pos' : ''}">${r.tipo === 'Entrata' ? '+' : '−'}${eur(r.importo)}</div></div>`;
+      <div class="amt ${r.tipo === 'Entrata' ? 'pos' : ''}">${r.tipo === 'Entrata' ? '+' : vers ? '' : '−'}${eur(r.importo)}</div></div>`;
   }).join('');
   apri(`<h2>Ricorrenti</h2><p class="hint" style="margin-bottom:12px">Movimenti che si registrano da soli ogni mese. Interrompendoli, quelli già registrati restano nello storico.</p>
     ${L.length ? `<div class="list">${righe}</div>` : '<div class="list"><div class="empty">Nessuna ricorrenza.<br>Creane una con <b>+</b> → "Ripeti ogni mese".</div></div>'}
@@ -898,6 +888,7 @@ function listaRicorrenti() {
 }
 function formRicorrente(id) {
   const r = S.dati.ricorrenti.find(x => x.id === id); if (!r) return;
+  if (r.tipo === 'Versamento') return formPac(r.categoria);
   F = Object.assign({ fineMai: !r.fine }, r);
   const cats = categorie(r.tipo); if (r.categoria && !cats.includes(r.categoria)) cats.push(r.categoria);
   const st = statoRic(r), n = rateRegistrate(r), tot = rateTotali(r);
@@ -914,6 +905,37 @@ function formRicorrente(id) {
       : `<button class="btn sec" style="margin-top:10px" onclick="riattivaRic('${esc(r.id)}')">▶︎ Riattiva</button>`}
     <button class="btn danger" style="margin-top:4px" onclick="eliminaRic('${esc(r.id)}')">Elimina la regola</button>`);
 }
+/* ---------- Versamento automatico (PAC) ---------- */
+function formPac(sid) {
+  const s = S.dati.strumenti.find(x => x.id === sid); if (!s) return;
+  const pc = pacDi(sid), st = pc && statoRic(pc);
+  const prossimo = (() => { const g = 15, k = oggiMese(); const dd = dataRata(k, g); return dd >= oggiISO() ? dd : dataRata(spostaMese(k, 1), g); })();
+  apri(`<h2>Versamento automatico</h2><div class="sm mut">${esc(s.nome)}</div>
+    ${pc ? `<div class="sm" style="margin-top:8px"><span class="${st.c}"><b>${st.t}</b></span> · dal ${dataIt(pc.inizio)} · registrati ${rateRegistrate(pc)}${prossimaRata(pc) ? ' · prossimo ' + dataIt(prossimaRata(pc)) : ''}</div>` : ''}
+    <p class="hint">Ogni mese, nel giorno indicato, il versamento viene registrato da solo: i soldi passano dalla liquidità all'investimento. Tu aggiorni solo il controvalore.</p>
+    <label class="f">Importo mensile</label><input class="in" id="pImp" inputmode="decimal" placeholder="Es. 200" value="${pc ? esc(String(pc.importo).replace('.', ',')) : ''}">
+    <label class="f">Giorno del mese</label><input class="in" id="pGiorno" inputmode="numeric" placeholder="Es. 15" value="${pc ? pc.giorno : ''}">
+    ${pc ? `<p class="hint">Se cambi importo o giorno, vale dal prossimo versamento: quelli già registrati restano com'erano.</p>`
+      : `<label class="f">Primo versamento automatico il</label><input class="in" type="date" id="pInizio" value="${prossimo}"><p class="hint">I mesi precedenti non vengono toccati: per quelli usa lo storico.</p>`}
+    <div class="btns" style="margin-top:16px"><button class="btn sec" onclick="chiudi()">Annulla</button><button class="btn" onclick="salvaPac('${esc(sid)}')">Salva</button></div>
+    ${pc ? (st.t === 'Attiva' ? `<button class="btn sec" style="margin-top:10px;color:var(--red)" onclick="interrompiRic('${esc(pc.id)}')">⏸ Sospendi da oggi</button>`
+      : `<button class="btn sec" style="margin-top:10px" onclick="riattivaRic('${esc(pc.id)}')">▶︎ Riattiva</button>`)
+      + `<button class="btn danger" style="margin-top:4px" onclick="eliminaRic('${esc(pc.id)}')">Elimina il versamento automatico</button>` : ''}`);
+}
+function salvaPac(sid) {
+  const s = S.dati.strumenti.find(x => x.id === sid), pc = pacDi(sid);
+  const imp = numero($('#pImp').value), giorno = parseInt($('#pGiorno').value, 10);
+  if (!(imp > 0)) return toast('Inserisci l\'importo mensile.');
+  if (!(giorno >= 1 && giorno <= 31)) return toast('Il giorno va da 1 a 31.');
+  let inizio = pc ? pc.inizio : $('#pInizio').value;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(inizio)) return toast('Indica la data del primo versamento.');
+  if (!pc) inizio = dataRata(inizio.slice(0, 7), giorno) < inizio ? dataRata(spostaMese(inizio.slice(0, 7), 1), giorno) : dataRata(inizio.slice(0, 7), giorno);
+  esegui({ action: 'salvaRicorrente', id: pc ? pc.id : uid(), nome: 'PAC ' + s.nome, tipo: 'Versamento', categoria: sid, importo: Math.round(imp * 100) / 100,
+    giorno, inizio, fine: pc ? pc.fine : '', attiva: pc ? pc.attiva : true, arretrati: false });
+  chiudi(); const n = pacDi(sid), p = n && prossimaRata(n);
+  toast(pc ? 'Versamento automatico aggiornato' : 'Versamento automatico attivato' + (p ? ': il primo il ' + dataIt(p) : ''));
+}
+
 function salvaRicorrenteModificata() {
   const imp = numero($('#rImp').value), giorno = parseInt($('#rGiorno').value, 10), fine = $('#rFine').value, nome = $('#rNome').value.trim();
   if (!nome) return toast('Inserisci un nome.');
@@ -924,7 +946,7 @@ function salvaRicorrenteModificata() {
   chiudi(); toast('Ricorrenza aggiornata');
 }
 function interrompiRic(id) {
-  if (!confirm('Interrompere questa ricorrenza da oggi?\n\nLe registrazioni già fatte restano nello storico; non ne verranno create di nuove.')) return;
+  if (!confirm('Fermarla da oggi?\n\nLe registrazioni già fatte restano nello storico; non ne verranno create di nuove.')) return;
   esegui({ action: 'interrompiRicorrente', id, data: oggiISO() }); chiudi(); toast('Ricorrenza interrotta: lo storico è salvo');
 }
 function riattivaRic(id) {
@@ -947,7 +969,10 @@ function formStrumento(id) {
     <label class="f">Nome</label><input class="in" id="sNome" value="${esc(F.nome)}" placeholder="Es. ETF MSCI World, Conto deposito X">
     <label class="f">Tipologia</label><select class="in" id="sTipo">${TIPOLOGIE.map(t => `<option ${t === F.tipologia ? 'selected' : ''}>${t}</option>`).join('')}</select>
     <label class="f">Nota (facoltativa)</label><input class="in" id="sNota" value="${esc(F.nota)}" placeholder="Es. ISIN, banca, broker">
-    ${s ? `<button class="btn sec" style="margin-top:14px" onclick="chiudi();setTimeout(()=>storicoStrumento('${esc(s.id)}'),260)">📅 Storico versamenti mese per mese</button>
+    ${s ? `${(() => { const pc = pacDi(s.id), st = pc && statoRic(pc); return `<div class="card" style="background:var(--card2);box-shadow:none;margin-top:14px;cursor:pointer" onclick="chiudi();setTimeout(()=>formPac('${esc(s.id)}'),260)">
+      <div class="row"><b>↗ Versamento automatico mensile</b><span class="mut">›</span></div>
+      <div class="sm" style="margin-top:4px">${pc ? `${eur(pc.importo)} il giorno ${pc.giorno} · <span class="${st.c}">${st.t}</span>${prossimaRata(pc) ? ' · prossimo ' + dataIt(prossimaRata(pc)) : ''}` : 'Non attivo. Tocca per impostarlo (es. PAC da 200 € al mese).'}</div></div>`; })()}
+    <button class="btn sec" style="margin-top:10px" onclick="chiudi();setTimeout(()=>storicoStrumento('${esc(s.id)}'),260)">📅 Storico versamenti mese per mese</button>
     <div class="switch"><span>Ancora in portafoglio</span><input type="checkbox" id="sAtt" ${F.attivo ? 'checked' : ''}></div><p class="hint">Se lo hai venduto tutto: registra in "Aggiorna valori" un prelievo pari a quanto hai incassato e valore 0, poi disattivalo qui.</p>` :
     `<label class="f">Capitale versato finora (facoltativo)</label><input class="in" id="sVers" inputmode="decimal" placeholder="0,00 €">
      <label class="f">Valore attuale (facoltativo)</label><input class="in" id="sVal" inputmode="decimal" placeholder="0,00 €">
@@ -961,7 +986,7 @@ function salvaStrumento() {
   esegui({ action: 'salvaStrumento', id, nome, tipologia: $('#sTipo').value, attivo: F.id ? $('#sAtt').checked : true, nota: $('#sNota').value.trim() });
   if (!F.id) {
     const v = numero($('#sVers').value), val = numero($('#sVal').value);
-    if (!isNaN(v) || !isNaN(val)) esegui({ action: 'salvaInvestimenti', mese: oggiMese(), righe: [{ strumentoId: id, flusso: isNaN(v) ? 0 : v, valore: isNaN(val) ? (isNaN(v) ? null : v) : val }] });
+    if (!isNaN(v) || !isNaN(val)) esegui({ action: 'salvaInvestimenti', mese: oggiMese(), ins: Date.now(), righe: [{ strumentoId: id, flusso: isNaN(v) ? 0 : v, valore: isNaN(val) ? (isNaN(v) ? null : v) : val }] });
   }
   chiudi(); toast('Strumento salvato');
 }
@@ -981,7 +1006,7 @@ function formValori(mese) {
   apri(`<h2>Aggiorna investimenti</h2>
     <div class="nav" style="margin:10px 0 4px"><button onclick="formValori('${spostaMese(mese, -1)}')">‹</button><div class="t">${nomeMese(mese)}</div><button onclick="formValori('${spostaMese(mese, 1)}')" ${mese >= oggiMese() ? 'disabled style="opacity:.3"' : ''}>›</button></div>
     <input type="hidden" id="vMese" value="${mese}">
-    <p class="hint">Per ogni strumento scrivi quanto hai aggiunto (o ritirato, con il segno −) in questo mese e quanto vale a fine mese. Il valore grigio è quello del mese precedente. Con ‹ torni ai mesi passati; per inserire molti mesi insieme tocca uno strumento → "Storico".</p>
+    <p class="hint">Per ogni strumento scrivi quanto hai aggiunto (o ritirato, con il segno −) in questo mese e quanto vale a fine mese. Il valore grigio è quello del mese precedente. Con ‹ torni ai mesi passati; per inserire molti mesi insieme tocca uno strumento → "Storico". I versamenti automatici sono già compilati: ti basta il valore.</p>
     <div style="margin-top:6px">${righe}</div>
     <div class="btns" style="margin-top:18px"><button class="btn sec" onclick="chiudi()">Annulla</button><button class="btn" onclick="salvaValori()">Salva</button></div>`);
 }
@@ -1001,7 +1026,7 @@ function salvaValori() {
   if (errore) return toast('Controlla i numeri inseriti.');
   if (!righe.length) return toast('Nessun valore inserito.');
   righe.forEach(r => { if (r.flusso === null && r.valore !== null) r.flusso = 0; });
-  esegui({ action: 'salvaInvestimenti', mese, righe });
+  esegui({ action: 'salvaInvestimenti', mese, righe, ins: Date.now() });
   chiudi(); toast('Investimenti aggiornati');
 }
 
@@ -1039,6 +1064,7 @@ window.addEventListener('offline', statoSync);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') sincronizza(true); });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 
+S.dati = generaLocale(JSON.parse(JSON.stringify(S.dati)));  // registra eventuali ricorrenze maturate anche offline
 render();
 sincronizza(true);
 </script>
